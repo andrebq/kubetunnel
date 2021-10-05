@@ -9,6 +9,7 @@
 start-server: dist
 	./dist/kubetunnel server -bind localhost:9001 -target localhost:9002
 
+kubetunnelUserLocal?=localhost:8081
 # This invocation will connect to the server at localhost:9001 and for every
 # connection received in the websocket it will proxy the connection to
 # localhost:8081.
@@ -16,7 +17,7 @@ start-server: dist
 # Effectively it is exposing localhost:8081 on the port desigined by the server
 # running at localhost:9001
 start-client: dist
-	./dist/kubetunnel client -server ws://localhost:9001/ws/anything -local localhost:8081
+	./dist/kubetunnel client -server ws://localhost:9001/ws/anything -local $(kubetunnelUserLocal)
 
 # This invocation will start a simple websocket bus
 start-websocket-bus: dist
