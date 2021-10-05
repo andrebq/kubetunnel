@@ -18,6 +18,9 @@ start-server: dist
 start-client: dist
 	./dist/kubetunnel client -server ws://localhost:9001/ws/anything -local localhost:8081
 
+# This invocation will start a simple websocket bus
+start-websocket-bus: dist
+	./dist/kubetunnel websocket-bus -bind localhost:8082 -directory $(PWD)/internal/demo/wsbus/site
 
 start-dummy-service: dist
 	./dist/kubetunnel static-file-server -bind localhost:8081 -directory $(PWD)
