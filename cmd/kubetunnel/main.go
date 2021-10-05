@@ -13,7 +13,7 @@ func main() {
 	app := &cli.App{
 		Name: "kubetunnel",
 		Commands: []*cli.Command{
-			cmds.Client(), cmds.Server(),
+			cmds.Client(), cmds.Server(), cmds.StaticFileServer(),
 		},
 	}
 

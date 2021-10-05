@@ -3,6 +3,7 @@ module github.com/andrebq/kubetunnel
 go 1.16
 
 require (
+	github.com/gorilla/websocket v1.4.2
 	github.com/rs/zerolog v1.25.0
 	github.com/urfave/cli/v2 v2.3.0
 	google.golang.org/grpc v1.41.0

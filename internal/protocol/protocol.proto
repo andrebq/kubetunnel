@@ -16,6 +16,7 @@ message Packet {
 	uint64 tunnelID = 1;
 	uint64 connID = 2;
 	bytes payload = 3;
+	bool newConnection = 4;
 }
 
 service Tunnel {

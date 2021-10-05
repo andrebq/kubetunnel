@@ -2,93 +2,146 @@ package kubetunnel
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"io"
 	"net"
-	"sync/atomic"
+	"net/http"
+	"sync"
+	"time"
 
-	"github.com/andrebq/kubetunnel/internal/protocol"
+	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type (
 	Server struct {
-		protocol.UnimplementedTunnelServer
+		localListener net.Listener
 
-		tunnels uint64
-
-		activeTunnels map[uint64]bool
+		proxyConn      chan net.Conn
+		listenerClosed chan struct{}
 	}
+)
+
+var (
+	upgrader = websocket.Upgrader{}
 )
 
 func NewServer() *Server {
 	return &Server{
-		activeTunnels: make(map[uint64]bool),
+		proxyConn:      make(chan net.Conn, 1),
+		listenerClosed: make(chan struct{}),
 	}
 }
 
-func (s *Server) Run(ctx context.Context, bind string) error {
-	server := grpc.NewServer()
-	protocol.RegisterTunnelServer(server, s)
-
-	lst, err := net.Listen("tcp", bind)
+func (s *Server) Run(ctx context.Context, websocketBind, targetBind string) error {
+	select {
+	case <-s.listenerClosed:
+		return errors.New("closed")
+	default:
+	}
+	lst, err := net.Listen("tcp", targetBind)
 	if err != nil {
 		return err
 	}
-
-	return server.Serve(lst)
-
-	// httpServer := http.Server{
-	// 	Addr:              bind,
-	// 	ReadTimeout:       time.Minute * 5,
-	// 	WriteTimeout:      time.Minute * 5,
-	// 	ReadHeaderTimeout: time.Minute * 5,
-	// 	Handler:           server,
-	// }
-	// return httpServer.ListenAndServe()
-}
-
-func (s *Server) Handshake(ctx context.Context, req *protocol.HandshakeRequest) (*protocol.HandshakeResponse, error) {
-	tid := atomic.AddUint64(&s.tunnels, 1)
-	s.activeTunnels[tid] = true
-	lst, err := net.Listen("tcp", req.GetRemoteBind())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Unable to bind on %v, cause %v", req.GetRemoteBind(), err))
-	}
-	go s.openTunnel(context.Background(), lst, tid)
-	return &protocol.HandshakeResponse{
-		RemoteBind: req.GetRemoteBind(),
-		TunnelID:   tid,
-	}, nil
-}
-
-func (s *Server) Mux(stream protocol.Tunnel_MuxServer) error {
-	for {
-		m, err := stream.Recv()
-		if err != nil {
-			return status.Error(codes.Aborted, err.Error())
-		}
-		err = stream.Send(m)
-		if err != nil {
-			return status.Error(codes.Aborted, err.Error())
-		}
-	}
-}
-
-func (s *Server) openTunnel(ctx context.Context, lst net.Listener, tid uint64) {
-	for {
-		conn, err := lst.Accept()
-		if err != nil {
-			log.Error().Err(err).Msg("Unable to accept new connection")
+	defer lst.Close()
+	go func() {
+		select {
+		case <-ctx.Done():
+			lst.Close()
+		case <-s.listenerClosed:
 			return
 		}
-		go s.handleConn(ctx, conn, tid)
+	}()
+	go func() {
+		defer close(s.listenerClosed)
+		timeout := time.NewTimer(time.Minute)
+		for {
+			conn, err := lst.Accept()
+			if err != nil {
+				log.Error().Err(err).Msg("Listener unable to accept new connections")
+			}
+			timeout.Reset(time.Minute)
+			select {
+			case s.proxyConn <- conn:
+			case <-timeout.C:
+				conn.Close()
+			}
+		}
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", s.handleWebsocket)
+	mux.HandleFunc("/", s.handleIndex)
+
+	httpServer := &http.Server{
+		Addr:              websocketBind,
+		ReadTimeout:       time.Minute * 10,
+		WriteTimeout:      time.Minute * 10,
+		ReadHeaderTimeout: time.Minute * 10,
+		IdleTimeout:       time.Minute * 30,
+		MaxHeaderBytes:    1_000_000,
+		Handler:           mux,
 	}
+
+	err = httpServer.ListenAndServe()
+	return err
 }
 
-func (s *Server) handleConn(ctx context.Context, conn net.Conn, tid uint64) {
-	log.Info().Str("local-addr", conn.LocalAddr().String()).Str("remote-addr", conn.RemoteAddr().String()).Msg("Got new connection")
-	conn.Close()
+func (s *Server) handleIndex(w http.ResponseWriter, req *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, "Welcome to kubetunnel")
+}
+
+func (s *Server) handleWebsocket(w http.ResponseWriter, req *http.Request) {
+	conn, err := upgrader.Upgrade(w, req, nil)
+	if err != nil {
+		log.Error().Err(err).Msg("Upgrade failed")
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer conn.Close()
+	var proxy net.Conn
+	select {
+	case proxy = <-s.proxyConn:
+	case <-s.listenerClosed:
+		return
+	}
+	log := log.With().Str("internal-client", proxy.RemoteAddr().String()).Str("websocket-client", conn.RemoteAddr().String()).Logger()
+	log.Info().Msg("Starting websocket tunnel")
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer conn.Close()
+		var buf [4069]byte
+		for {
+			n, err := proxy.Read(buf[:])
+			if err != nil {
+				log.Error().Err(err).Msg("Error reading data from internal client")
+				return
+			}
+			err = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+			if err != nil {
+				log.Error().Err(err).Msg("Error sending data to websocket client")
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		defer proxy.Close()
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				log.Error().Err(err).Msg("Error reading data from websocket client")
+				return
+			}
+			_, err = proxy.Write(msg)
+			if err != nil {
+				log.Error().Err(err).Msg("Error writing data to internal client")
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

@@ -6,7 +6,7 @@ import (
 )
 
 func Client() *cli.Command {
-	var remoteEndpoint, localEndpoint, serverAddress string
+	var localEndpoint, serverAddress string
 	return &cli.Command{
 		Name:  "client",
 		Usage: "Exposes a service running in the local host to the remote host",
@@ -28,22 +28,11 @@ func Client() *cli.Command {
 				Required:    true,
 				Destination: &localEndpoint,
 			},
-			&cli.StringFlag{
-				Name:        "remote-endpoint",
-				EnvVars:     []string{"KUBETUNNEL_CLIENT_REMOTE_ENDPOINT"},
-				Aliases:     []string{"remote"},
-				Usage:       "Address (use :<port> to ignore the domain) which will recieve connections on the remote server",
-				Required:    true,
-				Destination: &remoteEndpoint,
-			},
 		},
 
 		Action: func(appCtx *cli.Context) error {
-			cli, err := kubetunnel.NewClient(appCtx.Context, remoteEndpoint, localEndpoint, serverAddress)
-			if err != nil {
-				return err
-			}
-			return cli.Run(appCtx.Context)
+			cli := kubetunnel.NewClient()
+			return cli.Run(appCtx.Context, serverAddress, localEndpoint)
 		},
 	}
 }
