@@ -1,0 +1,24 @@
+syntax = "proto3";
+package protocol;
+
+option go_package = "github.com/andrebq/kubetunnel/internal/protocol";
+
+message HandshakeRequest {
+	string remoteBind = 1;
+}
+
+message HandshakeResponse {
+	string remoteBind = 1;
+	uint64 tunnelID = 2;
+}
+
+message Packet {
+	uint64 tunnelID = 1;
+	uint64 connID = 2;
+	bytes payload = 3;
+}
+
+service Tunnel {
+	rpc Handshake(HandshakeRequest) returns (HandshakeResponse) {}
+	rpc Mux(stream Packet) returns (stream Packet) {}
+}
